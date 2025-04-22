@@ -1,0 +1,46 @@
+{
+    "expo": {
+      "name": "FlappyBall",
+      "slug": "flappyball",
+      "version": "1.0.0",
+      "orientation": "portrait",
+      "icon": "./assets/icon.png",
+      "userInterfaceStyle": "light",
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "contain",
+        "backgroundColor": "#87CEEB"
+      },
+      "assetBundlePatterns": [
+        "**/*"
+      ],
+      "ios": {
+        "supportsTablet": true,
+        "bundleIdentifier": "com.flappyball.app"
+      },
+      "android": {
+        "adaptiveIcon": {
+          "foregroundImage": "./assets/adaptive-icon.png",
+          "backgroundColor": "#87CEEB"
+        },
+        "package": "com.flappyball.app"
+      },
+      "web": {
+        "favicon": "./assets/favicon.png"
+      },
+      "plugins": [
+        "expo-av",
+        "expo-splash-screen",
+        "expo-updates",
+        "expo-router"
+      ],
+      "scheme": "flappyball",
+      "updates": {
+        "url": "https://u.expo.dev/your-project-id"
+      },
+      "runtimeVersion": {
+        "policy": "sdkVersion"
+      }
+    }
+  }
+  
