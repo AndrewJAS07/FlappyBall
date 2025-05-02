@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -9,23 +9,34 @@ import {
   Animated,
   ImageBackground,
   Alert,
-  AsyncStorage,
 } from "react-native";
 import { Audio } from "expo-av";
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppRegistry } from 'react-native';
+import { UnderwaterBackground } from './assets/underwater-bg';
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 
 // Game Constants
-const GRAVITY = 0.6;
+const GRAVITY = 0.25;
 const PIPE_WIDTH = 60;
 const PIPE_HEIGHT = 300;
-const PIPE_GAP = 200;
-const PIPE_SPEED = 3;
-const JUMP_FORCE = 12;
-const BIRD_SIZE = 40;
+const PIPE_GAP = 300;
+const PIPE_SPEED = 2;
+const JUMP_FORCE = 8;
+const FISH_SIZE = 40;
+const POWERUP_TYPES = {
+  SLOW: 'slow',
+  SHIELD: 'shield',
+  DOUBLE_POINTS: 'doublePoints',
+  BUBBLE: 'bubble'
+};
 
-export default function App() {
+// Single entry point for the fish
+const ENTRY_POINT = { x: SCREEN_WIDTH / 2, y: SCREEN_HEIGHT / 2 };
+
+function Game() {
   // Game States
   const [gameStarted, setGameStarted] = useState(false);
   const [playerName, setPlayerName] = useState("");
@@ -37,9 +48,16 @@ export default function App() {
   const [gameOver, setGameOver] = useState(false);
   const [leaderboard, setLeaderboard] = useState([]);
   const [sound, setSound] = useState(null);
+  const [powerUps, setPowerUps] = useState([]);
+  const [activePowerUp, setActivePowerUp] = useState(null);
+  const [powerUpTimer, setPowerUpTimer] = useState(null);
+  const [difficulty, setDifficulty] = useState(1);
+  const [particles, setParticles] = useState([]);
+  const [bubbles, setBubbles] = useState([]);
 
-  // Animations
-  const birdRotation = new Animated.Value(0);
+  // Refs
+  const gameLoopRef = useRef(null);
+  const birdRotation = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     loadLeaderboard();
@@ -48,14 +66,23 @@ export default function App() {
       if (sound) {
         sound.unloadAsync();
       }
+      if (gameLoopRef.current) {
+        clearInterval(gameLoopRef.current);
+      }
+      if (powerUpTimer) {
+        clearTimeout(powerUpTimer);
+      }
     };
   }, []);
 
   const setupSound = async () => {
-    const { sound } = await Audio.Sound.createAsync(
-      require("./assets")
-    );
-    setSound(sound);
+    try {
+      // Skip sound loading for now since the file is not available
+      setSound(null);
+    } catch (error) {
+      console.error('Error loading sound:', error);
+      setSound(null);
+    }
   };
 
   const loadLeaderboard = async () => {
@@ -88,81 +115,229 @@ export default function App() {
       return;
     }
     setGameStarted(true);
-    setBirdY(SCREEN_HEIGHT / 2);
+    setBirdY(ENTRY_POINT.y);
     setVelocity(0);
+    birdRotation.setValue(0);
     setPipes([
-      { x: SCREEN_WIDTH, y: Math.random() * (SCREEN_HEIGHT - PIPE_GAP) },
-      { x: SCREEN_WIDTH + SCREEN_WIDTH / 2, y: Math.random() * (SCREEN_HEIGHT - PIPE_GAP) },
+      { x: SCREEN_WIDTH, y: Math.random() * (SCREEN_HEIGHT - PIPE_GAP - 200) + 100 },
+      { x: SCREEN_WIDTH + SCREEN_WIDTH / 2, y: Math.random() * (SCREEN_HEIGHT - PIPE_GAP - 200) + 100 },
     ]);
     setScore(0);
     setGameOver(false);
+    setDifficulty(1);
+    setPowerUps([]);
+    setActivePowerUp(null);
+    setParticles([]);
+    setBubbles([]);
+  };
+
+  const createParticles = (x, y) => {
+    const newParticles = Array(10).fill().map(() => ({
+      x,
+      y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: (Math.random() - 0.5) * 4,
+      size: Math.random() * 4 + 2,
+      color: `rgb(${Math.random() * 255}, ${Math.random() * 255}, ${Math.random() * 255})`,
+      life: 30
+    }));
+    setParticles(prev => [...prev, ...newParticles]);
+  };
+
+  const spawnPowerUp = () => {
+    if (Math.random() < 0.02) {
+      const powerUpTypes = Object.values(POWERUP_TYPES);
+      const type = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
+      setPowerUps(prev => [...prev, {
+        x: SCREEN_WIDTH,
+        y: Math.random() * (SCREEN_HEIGHT - 100) + 50,
+        type,
+        width: 30,
+        height: 30
+      }]);
+    }
+  };
+
+  const activatePowerUp = (powerUp) => {
+    setActivePowerUp(powerUp.type);
+    setPowerUps(prev => prev.filter(p => p !== powerUp));
+    
+    if (powerUpTimer) {
+      clearTimeout(powerUpTimer);
+    }
+
+    const timer = setTimeout(() => {
+      setActivePowerUp(null);
+    }, 5000);
+
+    setPowerUpTimer(timer);
+  };
+
+  const createBubble = () => {
+    if (Math.random() < 0.1) {
+      setBubbles(prev => [...prev, {
+        x: Math.random() * SCREEN_WIDTH,
+        y: SCREEN_HEIGHT,
+        size: Math.random() * 20 + 10,
+        speed: Math.random() * 2 + 1
+      }]);
+    }
+  };
+
+  const updateBubbles = () => {
+    setBubbles(prev => 
+      prev.map(bubble => ({
+        ...bubble,
+        y: bubble.y - bubble.speed
+      })).filter(bubble => bubble.y > -bubble.size)
+    );
   };
 
   useEffect(() => {
     if (!gameStarted || gameOver) return;
 
     const gameLoop = setInterval(() => {
-      setBirdY((prev) => prev + velocity);
+      // Update bird position with smoother movement
+      setBirdY((prev) => {
+        const newY = prev + velocity;
+        return Math.max(0, Math.min(newY, SCREEN_HEIGHT - FISH_SIZE));
+      });
       setVelocity((prev) => prev + GRAVITY);
 
-      // Rotate bird based on velocity
+      // Update particles
+      setParticles(prev => 
+        prev.map(p => ({
+          ...p,
+          x: p.x + p.vx,
+          y: p.y + p.vy,
+          life: p.life - 1
+        })).filter(p => p.life > 0)
+      );
+
+      // Rotate bird based on velocity with smoother animation
       Animated.timing(birdRotation, {
-        toValue: velocity > 0 ? 0.3 : -0.3,
-        duration: 100,
+        toValue: velocity > 0 ? 0.2 : -0.2,
+        duration: 200,
         useNativeDriver: true,
       }).start();
 
       // Move pipes
       setPipes((prev) =>
-        prev.map((pipe) => ({ x: pipe.x - PIPE_SPEED, y: pipe.y }))
+        prev.map((pipe) => ({ 
+          x: pipe.x - PIPE_SPEED * (activePowerUp === POWERUP_TYPES.SLOW ? 0.5 : 1), 
+          y: pipe.y 
+        }))
       );
 
-      // Generate new pipes
+      // Move power-ups
+      setPowerUps(prev =>
+        prev.map(powerUp => ({
+          ...powerUp,
+          x: powerUp.x - PIPE_SPEED
+        })).filter(powerUp => powerUp.x > -powerUp.width)
+      );
+
+      // Generate new pipes and power-ups
       if (pipes[0]?.x < -PIPE_WIDTH) {
         setPipes((prev) => [
           ...prev.slice(1),
-          { x: SCREEN_WIDTH, y: Math.random() * (SCREEN_HEIGHT - PIPE_GAP) },
+          { 
+            x: SCREEN_WIDTH, 
+            y: Math.random() * (SCREEN_HEIGHT - PIPE_GAP - 200) + 100 
+          },
         ]);
-        setScore((prev) => prev + 1);
+        // Add exactly 1 point for passing obstacle
+        setScore(prev => prev + 1);
+        createParticles(pipes[0].x + PIPE_WIDTH/2, pipes[0].y + PIPE_HEIGHT/2);
       }
 
-      // Check collision
-      const birdBox = {
-        top: birdY,
-        bottom: birdY + BIRD_SIZE,
-        left: SCREEN_WIDTH / 2 - BIRD_SIZE / 2,
-        right: SCREEN_WIDTH / 2 + BIRD_SIZE / 2,
-      };
+      // Spawn power-ups
+      spawnPowerUp();
 
-      const collision = pipes.some((pipe) => {
-        const pipeBox = {
-          top: pipe.y,
-          bottom: pipe.y + PIPE_HEIGHT,
-          left: pipe.x,
-          right: pipe.x + PIPE_WIDTH,
+      // Increase difficulty gradually
+      if (score % 15 === 0 && score > 0) {
+        setDifficulty(prev => Math.min(prev + 0.05, 1.5));
+      }
+
+      // Check power-up collision
+      powerUps.forEach(powerUp => {
+        const birdBox = {
+          top: birdY + 5,
+          bottom: birdY + FISH_SIZE - 5,
+          left: SCREEN_WIDTH / 2 - FISH_SIZE / 2 + 5,
+          right: SCREEN_WIDTH / 2 + FISH_SIZE / 2 - 5,
         };
 
-        return (
-          birdBox.right > pipeBox.left &&
-          birdBox.left < pipeBox.right &&
-          (birdBox.top < pipeBox.top + PIPE_HEIGHT || birdBox.bottom > pipeBox.top + PIPE_GAP)
-        );
+        if (
+          birdBox.right > powerUp.x &&
+          birdBox.left < powerUp.x + powerUp.width &&
+          birdBox.bottom > powerUp.y &&
+          birdBox.top < powerUp.y + powerUp.height
+        ) {
+          // Add points based on power-up type
+          if (powerUp.type === POWERUP_TYPES.BUBBLE) {
+            setScore(prev => prev + 2); // White bubble: +2 points
+          } else {
+            setScore(prev => prev + 5); // Yellow power-up: +5 points
+          }
+          activatePowerUp(powerUp);
+        }
       });
 
-      if (birdBox.bottom > SCREEN_HEIGHT || birdBox.top < 0 || collision) {
+      // Check for collisions with seaweed (obstacles)
+      const birdBox = {
+        top: birdY,
+        bottom: birdY + FISH_SIZE,
+        left: SCREEN_WIDTH / 2 - FISH_SIZE / 2,
+        right: SCREEN_WIDTH / 2 + FISH_SIZE / 2,
+      };
+
+      const hasCollision = pipes.some(pipe => {
+        // Check collision with top seaweed
+        const topSeaweedCollision = 
+          birdBox.right > pipe.x &&
+          birdBox.left < pipe.x + PIPE_WIDTH &&
+          birdBox.top < pipe.y;
+
+        // Check collision with bottom seaweed
+        const bottomSeaweedCollision = 
+          birdBox.right > pipe.x &&
+          birdBox.left < pipe.x + PIPE_WIDTH &&
+          birdBox.bottom > pipe.y + PIPE_GAP;
+
+        return topSeaweedCollision || bottomSeaweedCollision;
+      });
+
+      // Only check if bird is completely out of bounds or has collision
+      const isOutOfBounds = birdY < -50 || birdY + FISH_SIZE > SCREEN_HEIGHT + 50;
+
+      if ((isOutOfBounds || hasCollision) && activePowerUp !== POWERUP_TYPES.SHIELD) {
+        clearInterval(gameLoop);
         setGameOver(true);
         saveLeaderboard(score);
       }
-    }, 30);
 
-    return () => clearInterval(gameLoop);
-  }, [gameStarted, gameOver, pipes, birdY, velocity]);
+      // Update bubbles
+      createBubble();
+      updateBubbles();
+    }, 16);
+
+    gameLoopRef.current = gameLoop;
+
+    return () => {
+      clearInterval(gameLoop);
+    };
+  }, [gameStarted, gameOver, pipes, powerUps, activePowerUp, powerUpTimer]);
 
   const jump = async () => {
     if (gameOver) return;
     setVelocity(-JUMP_FORCE);
     if (sound) {
-      await sound.replayAsync();
+      try {
+        await sound.replayAsync();
+      } catch (error) {
+        console.error('Error playing sound:', error);
+      }
     }
   };
 
@@ -173,212 +348,299 @@ export default function App() {
 
   if (!gameStarted) {
     return (
-      <ImageBackground
-        source={require("./assets/background.png")}
-        style={styles.container}
-      >
-        <View style={styles.startContainer}>
-          <Text style={styles.title}>FlappyBall</Text>
+      <View style={styles.container}>
+        <UnderwaterBackground />
+        <View style={styles.startScreen}>
+          <Text style={styles.title}>Flappy Fish</Text>
           <TextInput
             style={styles.input}
             placeholder="Enter your name"
             value={playerName}
             onChangeText={setPlayerName}
           />
-          <TouchableOpacity style={styles.startButton} onPress={startGame}>
+          <TouchableOpacity style={styles.button} onPress={startGame}>
             <Text style={styles.buttonText}>Start Game</Text>
           </TouchableOpacity>
-          {leaderboard.length > 0 && (
-            <View style={styles.leaderboard}>
-              <Text style={styles.leaderboardTitle}>Leaderboard</Text>
-              {leaderboard.map((entry, index) => (
-                <Text key={index} style={styles.leaderboardEntry}>
-                  {index + 1}. {entry.name}: {entry.score}
-                </Text>
-              ))}
-            </View>
-          )}
         </View>
-      </ImageBackground>
+      </View>
     );
   }
 
   return (
-    <ImageBackground
-      source={require("./assets/background.png")}
-      style={styles.container}
-    >
-      <TouchableOpacity
-        style={styles.gameContainer}
-        activeOpacity={1}
+    <View style={styles.container}>
+      <UnderwaterBackground />
+      <TouchableOpacity 
+        style={styles.gameArea} 
+        activeOpacity={1} 
         onPress={jump}
       >
+        {/* Fish */}
+        <Animated.View
+          style={[
+            styles.fish,
+            {
+              top: birdY,
+              left: SCREEN_WIDTH / 2 - FISH_SIZE / 2,
+              transform: [{ rotate: birdRotation.interpolate({
+                inputRange: [-0.3, 0.3],
+                outputRange: ['-30deg', '30deg']
+              })}]
+            }
+          ]}
+        >
+          <View style={styles.fishBody} />
+          <View style={styles.fishTail} />
+        </Animated.View>
+
+        {/* Pipes (seaweed) */}
         {pipes.map((pipe, index) => (
           <View key={index}>
             <View
               style={[
-                styles.pipe,
+                styles.seaweed,
                 {
                   left: pipe.x,
-                  height: pipe.y,
-                  top: 0,
+                  top: pipe.y - PIPE_HEIGHT,
+                  height: PIPE_HEIGHT,
                 },
               ]}
             />
             <View
               style={[
-                styles.pipe,
+                styles.seaweed,
                 {
                   left: pipe.x,
-                  height: SCREEN_HEIGHT - pipe.y - PIPE_GAP,
                   top: pipe.y + PIPE_GAP,
+                  height: PIPE_HEIGHT,
                 },
               ]}
             />
           </View>
         ))}
-        <Animated.View
-          style={[
-            styles.bird,
-            {
-              top: birdY,
-              left: SCREEN_WIDTH / 2 - BIRD_SIZE / 2,
-              transform: [{ rotate: birdRotation.interpolate({
-                inputRange: [-0.3, 0.3],
-                outputRange: ["-30deg", "30deg"]
-              })}],
-            },
-          ]}
-        />
-        <Text style={styles.score}>{score}</Text>
-        {gameOver && (
-          <View style={styles.gameOverContainer}>
-            <Text style={styles.gameOverText}>Game Over!</Text>
-            <Text style={styles.finalScore}>Score: {score}</Text>
-            <TouchableOpacity style={styles.restartButton} onPress={resetGame}>
-              <Text style={styles.buttonText}>Play Again</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+
+        {/* Bubbles */}
+        {bubbles.map((bubble, index) => (
+          <View
+            key={index}
+            style={[
+              styles.bubble,
+              {
+                left: bubble.x,
+                top: bubble.y,
+                width: bubble.size,
+                height: bubble.size,
+              },
+            ]}
+          />
+        ))}
+
+        {/* Power-ups */}
+        {powerUps.map((powerUp, index) => (
+          <View
+            key={index}
+            style={[
+              styles.powerUp,
+              {
+                left: powerUp.x,
+                top: powerUp.y,
+                backgroundColor: powerUp.type === POWERUP_TYPES.BUBBLE ? '#87CEEB' : '#FFD700',
+              },
+            ]}
+          />
+        ))}
+
+        {/* Score */}
+        <Text style={styles.score}>Score: {score}</Text>
       </TouchableOpacity>
-    </ImageBackground>
+
+      {gameOver && (
+        <View style={styles.gameOver}>
+          <Text style={styles.gameOverText}>Game Over!</Text>
+          <Text style={styles.finalScore}>Final Score: {score}</Text>
+          <TouchableOpacity style={styles.button} onPress={resetGame}>
+            <Text style={styles.buttonText}>Play Again</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#87CEEB",
+    backgroundColor: '#000',
   },
-  startContainer: {
+  gameArea: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+  },
+  fish: {
+    position: 'absolute',
+    width: FISH_SIZE,
+    height: FISH_SIZE,
+    zIndex: 10,
+  },
+  fishBody: {
+    width: FISH_SIZE * 0.8,
+    height: FISH_SIZE * 0.6,
+    backgroundColor: '#FF6B6B',
+    borderRadius: FISH_SIZE * 0.3,
+    position: 'absolute',
+    left: FISH_SIZE * 0.1,
+    top: FISH_SIZE * 0.2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  fishTail: {
+    width: 0,
+    height: 0,
+    borderTopWidth: FISH_SIZE * 0.3,
+    borderBottomWidth: FISH_SIZE * 0.3,
+    borderLeftWidth: FISH_SIZE * 0.4,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    borderLeftColor: '#FF6B6B',
+    position: 'absolute',
+    right: -FISH_SIZE * 0.2,
+    top: FISH_SIZE * 0.1,
+  },
+  seaweed: {
+    position: 'absolute',
+    width: PIPE_WIDTH,
+    backgroundColor: '#2E8B57',
+    borderTopLeftRadius: PIPE_WIDTH / 2,
+    borderTopRightRadius: PIPE_WIDTH / 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  bubble: {
+    position: 'absolute',
+    backgroundColor: 'rgba(255, 255, 255, 0.6)',
+    borderRadius: 50,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  powerUp: {
+    position: 'absolute',
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  startScreen: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
     padding: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   title: {
     fontSize: 48,
     fontWeight: "bold",
     color: "#FFFFFF",
     marginBottom: 30,
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 10,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 2, height: 2 },
+    textShadowRadius: 5,
   },
   input: {
-    width: "80%",
-    height: 50,
-    backgroundColor: "rgba(255, 255, 255, 0.8)",
-    borderRadius: 25,
+    backgroundColor: "rgba(255, 255, 255, 0.9)",
     paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderRadius: 25,
+    width: "80%",
     marginBottom: 20,
     fontSize: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
-  startButton: {
+  button: {
     backgroundColor: "#4CAF50",
     paddingHorizontal: 30,
     paddingVertical: 15,
     borderRadius: 25,
-    marginBottom: 30,
+    marginBottom: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
   buttonText: {
     color: "#FFFFFF",
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "bold",
-  },
-  leaderboard: {
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
-    padding: 20,
-    borderRadius: 15,
-    width: "80%",
-  },
-  leaderboardTitle: {
-    color: "#FFFFFF",
-    fontSize: 24,
-    fontWeight: "bold",
-    marginBottom: 10,
-    textAlign: "center",
-  },
-  leaderboardEntry: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    marginBottom: 5,
-  },
-  gameContainer: {
-    flex: 1,
-  },
-  bird: {
-    position: "absolute",
-    width: BIRD_SIZE,
-    height: BIRD_SIZE,
-    backgroundColor: "#FFD700",
-    borderRadius: BIRD_SIZE / 2,
-    borderWidth: 2,
-    borderColor: "#FFA500",
-  },
-  pipe: {
-    position: "absolute",
-    width: PIPE_WIDTH,
-    backgroundColor: "#2E8B57",
-    borderWidth: 2,
-    borderColor: "#228B22",
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
   score: {
     position: "absolute",
     top: 50,
-    fontSize: 36,
+    alignSelf: "center",
+    fontSize: 32,
     fontWeight: "bold",
     color: "#FFFFFF",
-    textShadowColor: "rgba(0, 0, 0, 0.75)",
-    textShadowOffset: { width: -1, height: 1 },
-    textShadowRadius: 10,
-    alignSelf: "center",
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 2, height: 2 },
+    textShadowRadius: 5,
+    zIndex: 20,
   },
-  gameOverContainer: {
+  gameOver: {
     position: "absolute",
     top: SCREEN_HEIGHT / 2 - 100,
     left: SCREEN_WIDTH / 2 - 150,
-    width: 300,
-    backgroundColor: "rgba(0, 0, 0, 0.8)",
+    backgroundColor: "rgba(0, 0, 0, 0.9)",
     padding: 20,
     borderRadius: 15,
+    width: 300,
     alignItems: "center",
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4.65,
+    elevation: 8,
+    zIndex: 30,
   },
   gameOverText: {
-    color: "#FF0000",
+    color: "#FFFFFF",
     fontSize: 32,
     fontWeight: "bold",
-    marginBottom: 10,
+    marginBottom: 20,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 2, height: 2 },
+    textShadowRadius: 5,
   },
   finalScore: {
     color: "#FFFFFF",
     fontSize: 24,
     marginBottom: 20,
-  },
-  restartButton: {
-    backgroundColor: "#4CAF50",
-    paddingHorizontal: 30,
-    paddingVertical: 15,
-    borderRadius: 25,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
 });
+
+export default Game;
